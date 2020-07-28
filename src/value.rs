@@ -41,6 +41,8 @@ pub struct Message {
     pub fields: collections::BTreeMap<i32, Field>,
     /// Unknown fields on the message.
     pub unknown: protobuf::UnknownFields,
+
+    size: protobuf::CachedSize,
 }
 
 /// A message field value.
@@ -59,6 +61,7 @@ impl Message {
         let mut m = Message {
             fields: collections::BTreeMap::new(),
             unknown: protobuf::UnknownFields::new(),
+            size: Default::default(),
         };
 
         for field in message.fields() {
@@ -95,6 +98,36 @@ impl Message {
             }
         }
         Ok(())
+    }
+
+    // Sum of all field sizes
+    fn compute_size(&self) -> u32 {
+        let mut size = 0;
+        for (tag, field) in &self.fields {
+            size += field.size_with_tag(*tag as u32);
+        }
+        size += protobuf::rt::unknown_fields_size(&self.unknown);
+        self.size.set(size);
+        size
+    }
+
+    /// Write this message to the given output stream.
+    pub fn write_to(&self, os: &mut protobuf::CodedOutputStream) -> error::Result<()> {
+        self.compute_size();
+        for (tag, field) in &self.fields {
+            field.write_to_with_tag(*tag as u32, os, false)?;
+        }
+        os.write_unknown_fields(&self.unknown)?;
+        Ok(())
+    }
+
+    /// Write this message to a byte vector.
+    pub fn write_to_bytes(&self) -> error::Result<Vec<u8>> {
+        let mut v = Vec::new();
+        let mut stream = protobuf::CodedOutputStream::vec(&mut v);
+        self.write_to(&mut stream)?;
+        stream.flush()?;
+        Ok(v)
     }
 
     #[inline]
@@ -181,6 +214,136 @@ impl Field {
             Group => unimplemented!(),
             UnresolvedEnum(e) => Err(error::Error::UnknownEnum { name: e.to_owned() }),
             UnresolvedMessage(m) => Err(error::Error::UnknownMessage { name: m.to_owned() }),
+        }
+    }
+
+    #[inline]
+    fn size_with_tag(&self, tag: u32) -> u32 {
+        match self {
+            Self::Singular(Some(Value::Bool(b))) => match b {
+                true => 2,
+                _ => 0,
+            },
+            Self::Singular(Some(Value::I32(x))) => match *x {
+                0 => 0,
+                _ => protobuf::rt::value_size(tag, *x, wire_format::WireTypeVarint),
+            },
+            Self::Singular(Some(Value::I64(x))) => match *x {
+                0 => 0,
+                _ => protobuf::rt::value_size(tag, *x, wire_format::WireTypeVarint),
+            },
+            Self::Singular(Some(Value::U32(x))) => match *x {
+                0 => 0,
+                _ => protobuf::rt::value_size(tag, *x, wire_format::WireTypeVarint),
+            },
+            Self::Singular(Some(Value::U64(x))) => match *x {
+                0 => 0,
+                _ => protobuf::rt::value_size(tag, *x, wire_format::WireTypeVarint),
+            },
+            Self::Singular(Some(Value::F32(_))) => 5,
+            Self::Singular(Some(Value::F64(_))) => 9,
+            Self::Singular(Some(Value::Bytes(v))) => protobuf::rt::bytes_size(tag, &v),
+            Self::Singular(Some(Value::String(s))) => protobuf::rt::string_size(tag, &s),
+            Self::Singular(Some(Value::Enum(x))) => match *x {
+                0 => 0,
+                _ => protobuf::rt::value_size(tag, *x, wire_format::WireTypeVarint),
+            },
+            Self::Singular(Some(Value::Message(m))) => m.compute_size(),
+            Self::Repeated(v) => {
+                let mut size = 0;
+                for x in v {
+                    // TODO: Avoid cloning here.
+                    size += Field::Singular(Some(x.clone())).size_with_tag(tag);
+                }
+                size
+            }
+            Self::Singular(None) => 0,
+        }
+    }
+
+    /// Write this field to the given output stream.
+    #[inline]
+    pub fn write_to_with_tag(
+        &self,
+        tag: u32,
+        os: &mut protobuf::CodedOutputStream,
+        repeated_elem: bool,
+    ) -> error::Result<()> {
+        match self {
+            Self::Singular(Some(Value::Bool(b))) => {
+                if *b || repeated_elem {
+                    os.write_bool(tag, true)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::I32(x))) => {
+                if *x != 0 || repeated_elem {
+                    os.write_int32(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::I64(x))) => {
+                if *x != 0 || repeated_elem {
+                    os.write_int64(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::U32(x))) => {
+                if *x != 0 || repeated_elem {
+                    os.write_uint32(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::U64(x))) => {
+                if *x != 0 || repeated_elem {
+                    os.write_uint64(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::F32(x))) => {
+                if *x != 0 as f32 || repeated_elem {
+                    os.write_float(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::F64(x))) => {
+                if *x != 0 as f64 || repeated_elem {
+                    os.write_double(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::Bytes(v))) => {
+                if !v.is_empty() {
+                    os.write_bytes(tag, v.as_slice())?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::String(s))) => {
+                if !s.is_empty() || repeated_elem {
+                    os.write_string(tag, &s)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::Enum(x))) => {
+                if *x != 0 || repeated_elem {
+                    os.write_enum(tag, *x)?;
+                }
+                Ok(())
+            }
+            Self::Singular(Some(Value::Message(m))) => {
+                os.write_tag(tag, protobuf::wire_format::WireTypeLengthDelimited)?;
+                os.write_raw_varint32(m.size.get())?;
+                m.write_to(os)?;
+                Ok(())
+            }
+            Self::Repeated(v) => {
+                for x in v {
+                    // TODO: Avoid cloning here.
+                    Field::Singular(Some(x.clone())).write_to_with_tag(tag, os, true)?;
+                }
+                Ok(())
+            }
+            Self::Singular(None) => Ok(()),
         }
     }
 
